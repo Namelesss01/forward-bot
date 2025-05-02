@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { Telegraf } from 'telegraf';
 import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';

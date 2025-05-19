@@ -15,94 +15,142 @@ const adapter = new JSONFile('./db.json');
 const db = new Low(adapter);
 await db.read();
 
+// Инициализация базы данных, если она пустая
 if (!db.data) {
   db.data = {
-    sourceGroups: [],
-    targetGroups: [],
-    filters: [],
+    pairs: [],  // Инициализируем массив pairs
+    filters: ['цена', 'срочно', 'без посредников', 'торг', 'недорого'],
+    admins: [],
     forwardingEnabled: true
   };
   await db.write();
 }
 
-// Команда: добавить источник
-bot.command('add_source', async (ctx) => {
-  const chatId = ctx.chat.id;
-  if (!db.data.sourceGroups.includes(chatId)) {
-    db.data.sourceGroups.push(chatId);
-    await db.write();
-    ctx.reply('✅ Группа добавлена как источник.');
-  } else {
-    ctx.reply('ℹ️ Этот источник уже добавлен.');
-  }
-});
+// Функция для проверки и получения связки по sourceChatId
+function getPairBySource(sourceChatId) {
+  return db.data.pairs ? db.data.pairs.find(p => p.source === sourceChatId) : null;
+}
 
-// Команда: добавить получателя
-bot.command('add_target', async (ctx) => {
-  const chatId = ctx.chat.id;
-  if (!db.data.targetGroups.includes(chatId)) {
-    db.data.targetGroups.push(chatId);
-    await db.write();
-    ctx.reply('✅ Группа добавлена как получатель.');
-  } else {
-    ctx.reply('ℹ️ Эта группа уже добавлена.');
+// Команда: добавить связку (источник → получатели)
+bot.command('add_pair', async (ctx) => {
+  const [source, ...targets] = ctx.message.text.split(' ').slice(1);
+  if (!source || targets.length === 0) {
+    return ctx.reply('❌ Укажите: /add_pair <source_chat_id> <target_chat_id_1> <target_chat_id_2> ...');
   }
-});
 
-// Команда: добавить слово-фильтр
-bot.command('add_filter', async (ctx) => {
-  const word = ctx.message.text.split(' ')[1];
-  if (!word) return ctx.reply('❌ Укажите слово после команды.');
-  if (!db.data.filters.includes(word)) {
-    db.data.filters.push(word);
-    await db.write();
-    ctx.reply(`✅ Слово "${word}" добавлено в фильтр.`);
-  } else {
-    ctx.reply(`ℹ️ Слово "${word}" уже в фильтре.`);
+  const sourceChatId = parseInt(source);
+  const targetChatIds = targets.map(id => parseInt(id));
+
+  // Убедимся, что db.data.pairs существует
+  if (!db.data.pairs) {
+    db.data.pairs = [];  // Инициализируем если нет
   }
-});
 
-// Команда: включить / выключить пересылку
-bot.command('toggle_forwarding', async (ctx) => {
-  db.data.forwardingEnabled = !db.data.forwardingEnabled;
+  let pair = getPairBySource(sourceChatId);
+  if (pair) {
+    // Добавляем новые целевые группы, если они ещё не добавлены
+    targetChatIds.forEach(target => {
+      if (!pair.targets.includes(target)) {
+        pair.targets.push(target);
+      }
+    });
+  } else {
+    // Создаем новую связку
+    db.data.pairs.push({ source: sourceChatId, targets: targetChatIds });
+  }
+
   await db.write();
-  ctx.reply(`Пересылка ${db.data.forwardingEnabled ? 'включена ✅' : 'отключена ⛔️'}`);
+  ctx.reply(`✅ Связка добавлена: ${sourceChatId} → ${targetChatIds.join(', ')}`);
 });
 
-// Обработка входящих сообщений
+// Команда: удалить одну связку (источник → получатель)
+bot.command('remove_pair', async (ctx) => {
+  const [source, target] = ctx.message.text.split(' ').slice(1);
+  if (!source || !target) {
+    return ctx.reply('❌ Укажите: /remove_pair <source_chat_id> <target_chat_id>');
+  }
+
+  const sourceChatId = parseInt(source);
+  const targetChatId = parseInt(target);
+
+  const pair = getPairBySource(sourceChatId);
+  if (pair) {
+    pair.targets = pair.targets.filter(id => id !== targetChatId);
+    if (pair.targets.length === 0) {
+      db.data.pairs = db.data.pairs.filter(p => p.source !== sourceChatId);
+    }
+    await db.write();
+    ctx.reply(`✅ Связка удалена: ${sourceChatId} → ${targetChatId}`);
+  } else {
+    ctx.reply('❌ Связка не найдена.');
+  }
+});
+
+// Команда: список всех связок
+bot.command('list_pairs', (ctx) => {
+  const pairs = db.data.pairs || [];  // Проверка на существование pairs
+  const pairsList = pairs.map(pair => {
+    return `🔗 Источник: ${pair.source}\n➡️ Получатели: ${pair.targets.join(', ')}`;
+  }).join('\n\n');
+
+  ctx.reply(pairsList || '❌ Нет активных связок.');
+});
+
+// Обработка сообщений
 bot.on('message', async (ctx) => {
   const chatId = ctx.chat.id;
 
-  if (!db.data.sourceGroups.includes(chatId)) return;
   if (!db.data.forwardingEnabled) return;
 
   const msg = ctx.message;
-  const text = msg.text || msg.caption || '';
+  let text = msg.text || msg.caption || '';
   const lowerText = text.toLowerCase();
 
-  // Проверка на фильтр и нецензурные слова
+  // Фильтры
   const hasManualFilter = db.data.filters.some(word => lowerText.includes(word.toLowerCase()));
   const hasProfanity = leoProfanity.check(text);
-
   if (hasManualFilter || hasProfanity) return;
 
-  // Отправка сообщения в целевые группы
-  for (const targetChatId of db.data.targetGroups) {
+  // Находим связку для этого источника
+  const pair = getPairBySource(chatId);
+  if (!pair) return;
+
+  // Очистка текста от адресов, телефонов и слов-исключений
+  const phoneRegex = /(?:\+?\d{1,3})?[ .-]?\(?\d{3}\)?[ .-]?\d{3}[ .-]?\d{2}[ .-]?\d{2}/g;
+  const addressRegex = /(ул\.|улица|проспект|пр-т|пер\.|переулок|г\.|город|д\.|дом)[^\n,.!?]*/gi;
+  const excludedWords = db.data.filters;
+
+  function cleanText(input) {
+    let output = input;
+    output = output.replace(phoneRegex, '');
+    output = output.replace(addressRegex, '');
+    excludedWords.forEach(word => {
+      const wordRegex = new RegExp(word, 'gi');
+      output = output.replace(wordRegex, '');
+    });
+    return output.trim();
+  }
+
+  const cleanedText = cleanText(text);
+  if (!cleanedText) return;
+
+  // Пересылаем сообщение в соответствующие целевые группы
+  for (const targetChatId of pair.targets) {
     try {
-      if (msg.text) {
-        await bot.telegram.sendMessage(targetChatId, msg.text);
+      if (msg.text || msg.caption) {
+        await bot.telegram.sendMessage(targetChatId, cleanedText);
       } else if (msg.photo) {
         const photo = msg.photo[msg.photo.length - 1];
         await bot.telegram.sendPhoto(targetChatId, photo.file_id, {
-          caption: msg.caption || ''
+          caption: cleanedText
         });
       } else if (msg.video) {
         await bot.telegram.sendVideo(targetChatId, msg.video.file_id, {
-          caption: msg.caption || ''
+          caption: cleanedText
         });
       } else if (msg.document) {
         await bot.telegram.sendDocument(targetChatId, msg.document.file_id, {
-          caption: msg.caption || ''
+          caption: cleanedText
         });
       } else if (msg.audio) {
         await bot.telegram.sendAudio(targetChatId, msg.audio.file_id);
@@ -110,10 +158,10 @@ bot.on('message', async (ctx) => {
         await bot.telegram.sendVoice(targetChatId, msg.voice.file_id);
       }
     } catch (err) {
-      console.error('Ошибка при пересылке:', err);
+      console.error('❌ Ошибка при пересылке:', err);
     }
   }
 });
 
 bot.launch();
-console.log('✅ Бот запущен');
+console.log('🤖 Бот запущен');

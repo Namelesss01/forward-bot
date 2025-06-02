@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { Telegraf } from 'telegraf';
+import { Telegraf, Markup } from 'telegraf';
 import { Low } from 'lowdb';
 import { JSONFile } from 'lowdb/node';
 import * as dotenv from 'dotenv';
@@ -10,15 +10,13 @@ leoProfanity.loadDictionary('ru');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// Настройка базы данных
 const adapter = new JSONFile('./db.json');
 const db = new Low(adapter);
 await db.read();
 
-// Инициализация базы данных, если она пустая
 if (!db.data) {
   db.data = {
-    pairs: [],  // Инициализируем массив pairs
+    pairs: [],
     filters: ['цена', 'срочно', 'без посредников', 'торг', 'недорого'],
     admins: [],
     forwardingEnabled: true
@@ -26,36 +24,25 @@ if (!db.data) {
   await db.write();
 }
 
-// Функция для проверки и получения связки по sourceChatId
 function getPairBySource(sourceChatId) {
   return db.data.pairs ? db.data.pairs.find(p => p.source === sourceChatId) : null;
 }
 
-// Команда: добавить связку (источник → получатели)
 bot.command('add_pair', async (ctx) => {
   const [source, ...targets] = ctx.message.text.split(' ').slice(1);
-  if (!source || targets.length === 0) {
-    return ctx.reply('❌ Укажите: /add_pair <source_chat_id> <target_chat_id_1> <target_chat_id_2> ...');
-  }
+  if (!source || targets.length === 0) return ctx.reply('❌ Укажите: /add_pair <source_chat_id> <target_chat_id_1> <target_chat_id_2> ...');
 
   const sourceChatId = parseInt(source);
   const targetChatIds = targets.map(id => parseInt(id));
 
-  // Убедимся, что db.data.pairs существует
-  if (!db.data.pairs) {
-    db.data.pairs = [];  // Инициализируем если нет
-  }
+  if (!db.data.pairs) db.data.pairs = [];
 
   let pair = getPairBySource(sourceChatId);
   if (pair) {
-    // Добавляем новые целевые группы, если они ещё не добавлены
     targetChatIds.forEach(target => {
-      if (!pair.targets.includes(target)) {
-        pair.targets.push(target);
-      }
+      if (!pair.targets.includes(target)) pair.targets.push(target);
     });
   } else {
-    // Создаем новую связку
     db.data.pairs.push({ source: sourceChatId, targets: targetChatIds });
   }
 
@@ -63,12 +50,9 @@ bot.command('add_pair', async (ctx) => {
   ctx.reply(`✅ Связка добавлена: ${sourceChatId} → ${targetChatIds.join(', ')}`);
 });
 
-// Команда: удалить одну связку (источник → получатель)
 bot.command('remove_pair', async (ctx) => {
   const [source, target] = ctx.message.text.split(' ').slice(1);
-  if (!source || !target) {
-    return ctx.reply('❌ Укажите: /remove_pair <source_chat_id> <target_chat_id>');
-  }
+  if (!source || !target) return ctx.reply('❌ Укажите: /remove_pair <source_chat_id> <target_chat_id>');
 
   const sourceChatId = parseInt(source);
   const targetChatId = parseInt(target);
@@ -86,81 +70,123 @@ bot.command('remove_pair', async (ctx) => {
   }
 });
 
-// Команда: список всех связок
 bot.command('list_pairs', (ctx) => {
-  const pairs = db.data.pairs || [];  // Проверка на существование pairs
-  const pairsList = pairs.map(pair => {
-    return `🔗 Источник: ${pair.source}\n➡️ Получатели: ${pair.targets.join(', ')}`;
-  }).join('\n\n');
-
+  const pairs = db.data.pairs || [];
+  const pairsList = pairs.map(pair => `🔗 Источник: ${pair.source}\n➡️ Получатели: ${pair.targets.join(', ')}`).join('\n\n');
   ctx.reply(pairsList || '❌ Нет активных связок.');
 });
 
-// Обработка сообщений
-bot.on('message', async (ctx) => {
+bot.command('add_admin', async (ctx) => {
+  const userId = ctx.from.id;
+  if (!db.data.admins.includes(userId)) {
+    db.data.admins.push(userId);
+    await db.write();
+    ctx.reply('✅ Вы добавлены как админ.');
+  } else {
+    ctx.reply('✅ Вы уже админ.');
+  }
+});
+
+function cleanText(input) {
+  const phoneRegex = /(?:\+?\d{1,3})?[ .-]?\(?\d{3}\)?[ .-]?\d{3}[ .-]?\d{2}[ .-]?\d{2}/g;
+  const addressRegex = /(ул\.|улица|проспект|пр-т|пер\.|переулок|г\.|город|д\.|дом)[^\n,.!?]*/gi;
+
+  let output = input;
+  output = output.replace(phoneRegex, '');
+  output = output.replace(addressRegex, '');
+
+  db.data.filters.forEach(word => {
+    const wordRegex = new RegExp(word, 'gi');
+    output = output.replace(wordRegex, '');
+  });
+
+  return output.trim();
+}
+
+async function handleForward(ctx, msg) {
   const chatId = ctx.chat.id;
+  let text = msg.text || msg.caption || '';
 
   if (!db.data.forwardingEnabled) return;
 
-  const msg = ctx.message;
-  let text = msg.text || msg.caption || '';
-  const lowerText = text.toLowerCase();
-
-  // Фильтры
-  const hasManualFilter = db.data.filters.some(word => lowerText.includes(word.toLowerCase()));
+  const hasManualFilter = db.data.filters.some(word => text.toLowerCase().includes(word.toLowerCase()));
   const hasProfanity = leoProfanity.check(text);
   if (hasManualFilter || hasProfanity) return;
 
-  // Находим связку для этого источника
   const pair = getPairBySource(chatId);
   if (!pair) return;
 
-  // Очистка текста от адресов, телефонов и слов-исключений
-  const phoneRegex = /(?:\+?\d{1,3})?[ .-]?\(?\d{3}\)?[ .-]?\d{3}[ .-]?\d{2}[ .-]?\d{2}/g;
-  const addressRegex = /(ул\.|улица|проспект|пр-т|пер\.|переулок|г\.|город|д\.|дом)[^\n,.!?]*/gi;
-  const excludedWords = db.data.filters;
-
-  function cleanText(input) {
-    let output = input;
-    output = output.replace(phoneRegex, '');
-    output = output.replace(addressRegex, '');
-    excludedWords.forEach(word => {
-      const wordRegex = new RegExp(word, 'gi');
-      output = output.replace(wordRegex, '');
-    });
-    return output.trim();
-  }
-
   const cleanedText = cleanText(text);
-  if (!cleanedText) return;
+  let finalText = cleanedText;
 
-  // Пересылаем сообщение в соответствующие целевые группы
+  const chatLink = `https://t.me/c/${String(chatId).substring(4)}/${msg.message_id}`;
+
   for (const targetChatId of pair.targets) {
     try {
       if (msg.text || msg.caption) {
-        await bot.telegram.sendMessage(targetChatId, cleanedText);
+        await bot.telegram.sendMessage(
+          targetChatId,
+          finalText,
+          Markup.inlineKeyboard([
+            Markup.button.url('👁‍🗨 Открыть оригинал', `https://t.me/c/${String(chatId).substring(4)}/${msg.message_id}`)
+          ])
+        );
       } else if (msg.photo) {
         const photo = msg.photo[msg.photo.length - 1];
-        await bot.telegram.sendPhoto(targetChatId, photo.file_id, {
-          caption: cleanedText
-        });
+        await bot.telegram.sendPhoto(
+          targetChatId,
+          photo.file_id,
+          {
+            caption: finalText,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '👁‍🗨 Открыть оригинал', url: chatLink }]
+              ]
+            }
+          }
+        );
       } else if (msg.video) {
-        await bot.telegram.sendVideo(targetChatId, msg.video.file_id, {
-          caption: cleanedText
-        });
+        await bot.telegram.sendVideo(
+          targetChatId,
+          msg.video.file_id,
+          {
+            caption: finalText,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '👁‍🗨 Открыть оригинал', url: chatLink }]
+              ]
+            }
+          }
+        );
       } else if (msg.document) {
-        await bot.telegram.sendDocument(targetChatId, msg.document.file_id, {
-          caption: cleanedText
-        });
-      } else if (msg.audio) {
-        await bot.telegram.sendAudio(targetChatId, msg.audio.file_id);
-      } else if (msg.voice) {
-        await bot.telegram.sendVoice(targetChatId, msg.voice.file_id);
+        await bot.telegram.sendDocument(
+          targetChatId,
+          msg.document.file_id,
+          {
+            caption: finalText,
+            parse_mode: 'Markdown',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '👁‍🗨 Открыть оригинал', url: chatLink }]
+              ]
+            }
+          }
+        );
       }
     } catch (err) {
       console.error('❌ Ошибка при пересылке:', err);
     }
   }
+}
+
+bot.on('message', async (ctx) => {
+  await handleForward(ctx, ctx.message);
+});
+
+bot.on('channel_post', async (ctx) => {
+  await handleForward(ctx, ctx.channelPost);
 });
 
 bot.launch();

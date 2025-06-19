@@ -8,186 +8,253 @@ import leoProfanity from 'leo-profanity';
 dotenv.config();
 leoProfanity.loadDictionary('ru');
 
-const bot = new Telegraf(process.env.BOT_TOKEN);
+async function main() {
+  const bot = new Telegraf(process.env.BOT_TOKEN);
 
-const adapter = new JSONFile('./db.json');
-const db = new Low(adapter);
-await db.read();
+  const adapter = new JSONFile('./db.json');
+  const db = new Low(adapter);
+  await db.read();
 
-if (!db.data) {
-  db.data = {
-    pairs: [],
-    filters: ['цена', 'срочно', 'без посредников', 'торг', 'недорого'],
-    admins: [],
-    forwardingEnabled: true
-  };
-  await db.write();
-}
-
-function getPairBySource(sourceChatId) {
-  return db.data.pairs ? db.data.pairs.find(p => p.source === sourceChatId) : null;
-}
-
-bot.command('add_pair', async (ctx) => {
-  const [source, ...targets] = ctx.message.text.split(' ').slice(1);
-  if (!source || targets.length === 0) return ctx.reply('❌ Укажите: /add_pair <source_chat_id> <target_chat_id_1> <target_chat_id_2> ...');
-
-  const sourceChatId = parseInt(source);
-  const targetChatIds = targets.map(id => parseInt(id));
-
-  if (!db.data.pairs) db.data.pairs = [];
-
-  let pair = getPairBySource(sourceChatId);
-  if (pair) {
-    targetChatIds.forEach(target => {
-      if (!pair.targets.includes(target)) pair.targets.push(target);
-    });
-  } else {
-    db.data.pairs.push({ source: sourceChatId, targets: targetChatIds });
+  if (!db.data) {
+    db.data = {
+      pairs: [],
+      filters: ['цена', 'срочно', 'без посредников', 'торг', 'недорого'],
+      admins: [],
+      forwardingEnabled: true
+    };
+    await db.write();
   }
 
-  await db.write();
-  ctx.reply(`✅ Связка добавлена: ${sourceChatId} → ${targetChatIds.join(', ')}`);
-});
+  if (!db.data.admins.includes(855367383)) {
+    db.data.admins.push(855367383);
+    await db.write();
+    console.log('✅ Админ добавлен вручную');
+  }
 
-bot.command('remove_pair', async (ctx) => {
-  const [source, target] = ctx.message.text.split(' ').slice(1);
-  if (!source || !target) return ctx.reply('❌ Укажите: /remove_pair <source_chat_id> <target_chat_id>');
+  function getPairBySource(sourceChatId) {
+    return db.data.pairs.find(p => p.source === sourceChatId);
+  }
 
-  const sourceChatId = parseInt(source);
-  const targetChatId = parseInt(target);
-
-  const pair = getPairBySource(sourceChatId);
-  if (pair) {
-    pair.targets = pair.targets.filter(id => id !== targetChatId);
-    if (pair.targets.length === 0) {
-      db.data.pairs = db.data.pairs.filter(p => p.source !== sourceChatId);
+  async function getChatIdFromUsername(username) {
+    if (!username.startsWith('@')) username = '@' + username;
+    try {
+      const chat = await bot.telegram.getChat(username);
+      return chat.id;
+    } catch (error) {
+      console.error(`❌ Не удалось получить chat_id для ${username}:`, error.message);
+      return null;
     }
-    await db.write();
-    ctx.reply(`✅ Связка удалена: ${sourceChatId} → ${targetChatId}`);
-  } else {
-    ctx.reply('❌ Связка не найдена.');
   }
-});
 
-bot.command('list_pairs', (ctx) => {
-  const pairs = db.data.pairs || [];
-  const pairsList = pairs.map(pair => `🔗 Источник: ${pair.source}\n➡️ Получатели: ${pair.targets.join(', ')}`).join('\n\n');
-  ctx.reply(pairsList || '❌ Нет активных связок.');
-});
+  bot.start(async (ctx) => {
+    const isAdmin = db.data.admins.includes(ctx.from.id);
+    if (!isAdmin) return ctx.reply('❌ У вас нет прав администратора.');
 
-bot.command('add_admin', async (ctx) => {
-  const userId = ctx.from.id;
-  if (!db.data.admins.includes(userId)) {
-    db.data.admins.push(userId);
-    await db.write();
-    ctx.reply('✅ Вы добавлены как админ.');
-  } else {
-    ctx.reply('✅ Вы уже админ.');
-  }
-});
-
-function cleanText(input) {
-  const phoneRegex = /(?:\+?\d{1,3})?[ .-]?\(?\d{3}\)?[ .-]?\d{3}[ .-]?\d{2}[ .-]?\d{2}/g;
-  const addressRegex = /(ул\.|улица|проспект|пр-т|пер\.|переулок|г\.|город|д\.|дом)[^\n,.!?]*/gi;
-
-  let output = input;
-  output = output.replace(phoneRegex, '');
-  output = output.replace(addressRegex, '');
-
-  db.data.filters.forEach(word => {
-    const wordRegex = new RegExp(word, 'gi');
-    output = output.replace(wordRegex, '');
+    await ctx.reply('🔧 Панель управления:', Markup.inlineKeyboard([
+      [Markup.button.callback('➕ Добавить канал', 'add_channel')],
+      [Markup.button.callback('📋 Мои связки', 'list_pairs')],
+      [
+        Markup.button.callback('✅ Вкл пересылку', 'enable_forwarding'),
+        Markup.button.callback('❌ Выкл пересылку', 'disable_forwarding')
+      ]
+    ]));
   });
 
-  return output.trim();
-}
+  bot.action('add_channel', async (ctx) => {
+    await ctx.answerCbQuery();
+    ctx.reply('✏️ Используйте команду:\n`/addchannel @source @target1 [@target2 ...]`', { parse_mode: 'Markdown' });
+  });
 
-async function handleForward(ctx, msg) {
-  const chatId = ctx.chat.id;
-  let text = msg.text || msg.caption || '';
+  bot.action('list_pairs', async (ctx) => {
+    await ctx.answerCbQuery();
+    const pairs = db.data.pairs || [];
 
-  if (!db.data.forwardingEnabled) return;
+    if (pairs.length === 0) return ctx.reply('❌ Нет активных связок.');
 
-  const hasManualFilter = db.data.filters.some(word => text.toLowerCase().includes(word.toLowerCase()));
-  const hasProfanity = leoProfanity.check(text);
-  if (hasManualFilter || hasProfanity) return;
+    for (const pair of pairs) {
+      let sourceTag = `\`${pair.source}\``;
+      try {
+        const sourceChat = await bot.telegram.getChat(pair.source);
+        sourceTag = sourceChat.username ? `@${sourceChat.username}` : sourceChat.title;
+      } catch (e) {}
 
-  const pair = getPairBySource(chatId);
-  if (!pair) return;
+      const targetsFormatted = await Promise.all(pair.targets.map(async (id) => {
+        try {
+          const chat = await bot.telegram.getChat(id);
+          return chat.username ? `@${chat.username}` : chat.title;
+        } catch (e) {
+          return `\`${id}\``;
+        }
+      }));
 
-  const cleanedText = cleanText(text);
-  let finalText = cleanedText;
+      await ctx.reply(`🔗 Источник: ${sourceTag}\n➡️ Получатели: ${targetsFormatted.join(', ')}`,
+        Markup.inlineKeyboard([
+          [Markup.button.callback(`❌ Удалить связку`, `delete_pair_${pair.source}`)]
+        ])
+      );
+    }
+  });
 
-  const chatLink = `https://t.me/c/${String(chatId).substring(4)}/${msg.message_id}`;
+  bot.action('enable_forwarding', async (ctx) => {
+    await ctx.answerCbQuery('✅ Пересылка включена');
+    db.data.forwardingEnabled = true;
+    await db.write();
+  });
 
-  for (const targetChatId of pair.targets) {
-    try {
-      if (msg.text || msg.caption) {
-        await bot.telegram.sendMessage(
-          targetChatId,
-          finalText,
-          Markup.inlineKeyboard([
-            Markup.button.url('👁‍🗨 Открыть оригинал', `https://t.me/c/${String(chatId).substring(4)}/${msg.message_id}`)
-          ])
-        );
-      } else if (msg.photo) {
-        const photo = msg.photo[msg.photo.length - 1];
-        await bot.telegram.sendPhoto(
-          targetChatId,
-          photo.file_id,
-          {
-            caption: finalText,
-            parse_mode: 'Markdown',
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: '👁‍🗨 Открыть оригинал', url: chatLink }]
-              ]
-            }
-          }
-        );
-      } else if (msg.video) {
-        await bot.telegram.sendVideo(
-          targetChatId,
-          msg.video.file_id,
-          {
-            caption: finalText,
-            parse_mode: 'Markdown',
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: '👁‍🗨 Открыть оригинал', url: chatLink }]
-              ]
-            }
-          }
-        );
-      } else if (msg.document) {
-        await bot.telegram.sendDocument(
-          targetChatId,
-          msg.document.file_id,
-          {
-            caption: finalText,
-            parse_mode: 'Markdown',
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: '👁‍🗨 Открыть оригинал', url: chatLink }]
-              ]
-            }
-          }
-        );
+  bot.action('disable_forwarding', async (ctx) => {
+    await ctx.answerCbQuery('❌ Пересылка отключена');
+    db.data.forwardingEnabled = false;
+    await db.write();
+  });
+
+  bot.action(/^delete_pair_(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const sourceId = parseInt(ctx.match[1]);
+    const index = db.data.pairs.findIndex(p => p.source === sourceId);
+    if (index !== -1) {
+      db.data.pairs.splice(index, 1);
+      await db.write();
+      ctx.reply(`✅ Связка с источником ${sourceId} удалена.`);
+    } else {
+      ctx.reply('❌ Связка не найдена.');
+    }
+  });
+
+  bot.command('addchannel', async (ctx) => {
+    const args = ctx.message.text.split(' ').slice(1);
+    if (args.length < 2) {
+      ctx.reply('❌ Укажите: /addchannel @source @target1 [@target2 ...]');
+      return;
+    }
+
+    const [source, ...targets] = args;
+    const sourceId = await getChatIdFromUsername(source);
+    const targetIds = [];
+
+    for (const target of targets) {
+      const id = await getChatIdFromUsername(target);
+      if (id) {
+        targetIds.push(id);
+      } else {
+        ctx.reply(`⚠️ Не удалось найти: ${target}`);
       }
-    } catch (err) {
-      console.error('❌ Ошибка при пересылке:', err);
+    }
+
+    if (!sourceId || targetIds.length === 0) {
+      ctx.reply('❌ Ошибка: исходный канал или получатели не найдены.');
+      return;
+    }
+
+    let pair = getPairBySource(sourceId);
+    if (pair) {
+      targetIds.forEach(id => {
+        if (!pair.targets.includes(id)) pair.targets.push(id);
+      });
+    } else {
+      db.data.pairs.push({ source: sourceId, targets: targetIds });
+    }
+
+    await db.write();
+    ctx.reply(`✅ Связка добавлена: ${source} → ${targets.join(', ')}`);
+  });
+
+  function cleanText(input) {
+    const phoneRegex = /(?:\+?\d{1,3})?[ .-]?\(?\d{3}\)?[ .-]?\d{3}[ .-]?\d{2}[ .-]?\d{2}/g;
+    const addressRegex = /(ул\.|улица|проспект|пр-т|пер\.|переулок|г\.|город|д\.|дом)[^\n,.!?]*/gi;
+
+    let output = input;
+    output = output.replace(phoneRegex, '');
+    output = output.replace(addressRegex, '');
+
+    db.data.filters.forEach(word => {
+      const wordRegex = new RegExp(word, 'gi');
+      output = output.replace(wordRegex, '');
+    });
+
+    return output.trim();
+  }
+
+  const messageQueue = [];
+  let isProcessing = false;
+
+  async function processQueue() {
+    if (isProcessing || messageQueue.length === 0) return;
+    isProcessing = true;
+
+    const { ctx, msg } = messageQueue.shift();
+    await handleForward(ctx, msg);
+
+    setTimeout(() => {
+      isProcessing = false;
+      processQueue();
+    }, 300);
+  }
+
+  async function handleForward(ctx, msg) {
+    const chatId = ctx.chat.id;
+    const text = msg.text || msg.caption || '';
+    if (!db.data.forwardingEnabled) return;
+
+    const hasManualFilter = db.data.filters.some(word => text.toLowerCase().includes(word.toLowerCase()));
+    const hasProfanity = leoProfanity.check(text);
+    if (hasManualFilter || hasProfanity) return;
+
+    const pair = getPairBySource(chatId);
+    if (!pair) return;
+
+    const cleanedText = cleanText(text);
+    if (!cleanedText && !msg.photo && !msg.video && !msg.document) return;
+
+    const chatLink = `https://t.me/c/${String(chatId).substring(4)}/${msg.message_id}`;
+    const replyMarkup = {
+      inline_keyboard: [[{ text: '‎', url: chatLink }]]
+    };
+
+    for (const targetChatId of pair.targets) {
+      try {
+        if (msg.photo) {
+          const photo = msg.photo[msg.photo.length - 1];
+          await bot.telegram.sendPhoto(targetChatId, photo.file_id, {
+            caption: cleanedText,
+            parse_mode: 'Markdown',
+            reply_markup: replyMarkup
+          });
+        } else if (msg.video) {
+          await bot.telegram.sendVideo(targetChatId, msg.video.file_id, {
+            caption: cleanedText,
+            parse_mode: 'Markdown',
+            reply_markup: replyMarkup
+          });
+        } else if (msg.document) {
+          await bot.telegram.sendDocument(targetChatId, msg.document.file_id, {
+            caption: cleanedText,
+            parse_mode: 'Markdown',
+            reply_markup: replyMarkup
+          });
+        } else if (msg.text) {
+          await bot.telegram.sendMessage(targetChatId, cleanedText, {
+            parse_mode: 'Markdown',
+            reply_markup: replyMarkup
+          });
+        }
+      } catch (err) {
+        console.error('❌ Ошибка при пересылке:', err.description || err.message);
+      }
     }
   }
+
+  bot.on('message', async (ctx) => {
+    messageQueue.push({ ctx, msg: ctx.message });
+    processQueue();
+  });
+
+  bot.on('channel_post', async (ctx) => {
+    messageQueue.push({ ctx, msg: ctx.channelPost });
+    processQueue();
+  });
+
+  bot.launch();
+  console.log('🤖 Бот запущен');
 }
 
-bot.on('message', async (ctx) => {
-  await handleForward(ctx, ctx.message);
-});
-
-bot.on('channel_post', async (ctx) => {
-  await handleForward(ctx, ctx.channelPost);
-});
-
-bot.launch();
-console.log('🤖 Бот запущен');
+main();

@@ -20,14 +20,11 @@ async function main() {
     db.data = {
       pairs: [],
       filters: ['цена', 'срочно', 'без посредников', 'торг', 'недорого'],
-      admins: [],
       forwardingEnabled: true,
       stats: []
     };
     await db.write();
   }
-
-  const isAdmin = (id) => db.data.admins.includes(id);
 
   function getPairBySource(sourceChatId) {
     return db.data.pairs.find(p => p.source === sourceChatId);
@@ -53,8 +50,6 @@ async function main() {
   }
 
   bot.start(async (ctx) => {
-    if (!isAdmin(ctx.from.id)) return ctx.reply('❌ У вас нет прав администратора.');
-
     await ctx.reply('🔧 Панель управления:', Markup.inlineKeyboard([
       [Markup.button.callback('➕ Добавить канал', 'add_channel')],
       [Markup.button.callback('📋 Мои связки', 'list_pairs')],
@@ -66,15 +61,26 @@ async function main() {
     ]));
   });
 
-  bot.command('add_admin', async (ctx) => {
-    if (!isAdmin(ctx.from.id)) return ctx.reply('❌ Только админ может добавлять других.');
-    const userId = Number(ctx.message.text.split(' ')[1]);
-    if (!userId) return ctx.reply('❌ Укажите ID: /add_admin 123456');
-    if (!db.data.admins.includes(userId)) {
-      db.data.admins.push(userId);
-      await db.write();
-      ctx.reply(`✅ Админ с ID ${userId} добавлен.`);
-    } else ctx.reply('⚠️ Уже в списке админов.');
+  bot.command('addchannel', async (ctx) => {
+    const args = ctx.message.text.split(' ').slice(1);
+    if (args.length < 2) return ctx.reply('❌ Укажите: /addchannel @source @target1 [@target2 ...]');
+
+    const [source, ...targets] = args;
+    const sourceId = await getChatIdFromUsername(source);
+    const targetIds = [];
+    for (const target of targets) {
+      const id = await getChatIdFromUsername(target);
+      if (id) targetIds.push(id);
+      else ctx.reply(`⚠️ Не найден: ${target}`);
+    }
+    if (!sourceId || targetIds.length === 0) return ctx.reply('❌ Ошибка: исходный или целевые каналы не найдены.');
+
+    let pair = getPairBySource(sourceId);
+    if (pair) targetIds.forEach(id => { if (!pair.targets.includes(id)) pair.targets.push(id); });
+    else db.data.pairs.push({ source: sourceId, targets: targetIds });
+
+    await db.write();
+    ctx.reply(`✅ Связка добавлена.`);
   });
 
   bot.action('show_stats', async (ctx) => {
@@ -146,28 +152,6 @@ async function main() {
     await db.write();
   });
 
-  bot.command('addchannel', async (ctx) => {
-    if (!isAdmin(ctx.from.id)) return;
-    const args = ctx.message.text.split(' ').slice(1);
-    if (args.length < 2) return ctx.reply('❌ Укажите: /addchannel @source @target1 [@target2 ...]');
-
-    const [source, ...targets] = args;
-    const sourceId = await getChatIdFromUsername(source);
-    const targetIds = [];
-    for (const target of targets) {
-      const id = await getChatIdFromUsername(target);
-      if (id) targetIds.push(id);
-    }
-    if (!sourceId || targetIds.length === 0) return ctx.reply('❌ Ошибка: исходный или целевые каналы не найдены.');
-
-    let pair = getPairBySource(sourceId);
-    if (pair) targetIds.forEach(id => { if (!pair.targets.includes(id)) pair.targets.push(id); });
-    else db.data.pairs.push({ source: sourceId, targets: targetIds });
-
-    await db.write();
-    ctx.reply(`✅ Связка добавлена.`);
-  });
-
   function cleanText(input) {
     const phoneRegex = /(?:\+?\d{1,3})?[ .-]?\(?\d{3}\)?[ .-]?\d{3}[ .-]?\d{2}[ .-]?\d{2}/g;
     const addressRegex = /(ул\\.|улица|проспект|пр-т|пер\\.|переулок|г\\.|город|д\\.|дом)[^\n,.!?]*/gi;
@@ -211,7 +195,7 @@ async function main() {
     if (!cleanedText && !msg.photo && !msg.video && !msg.document) return;
 
     const chatLink = `https://t.me/c/${String(chatId).substring(4)}/${msg.message_id}`;
-    const replyMarkup = { inline_keyboard: [[{ text: '‎', url: chatLink }]] };
+    const replyMarkup = { inline_keyboard: [[{ text: '\u200e', url: chatLink }]] };
 
     for (const target of pair.targets) {
       try {

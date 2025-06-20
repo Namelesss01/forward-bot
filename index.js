@@ -40,6 +40,16 @@ async function main() {
     }
   }
 
+  async function getChatIdFromUsername(username) {
+    if (!username.startsWith('@')) username = '@' + username;
+    try {
+      const chat = await bot.telegram.getChat(username);
+      return chat.id;
+    } catch (error) {
+      return null;
+    }
+  }
+
   bot.start(async (ctx) => {
     const isAdmin = db.data.admins.includes(ctx.from.id);
     if (!isAdmin) return ctx.reply('❌ У вас нет прав администратора.');
@@ -107,23 +117,6 @@ async function main() {
     } else {
       ctx.reply('❌ Связка не найдена.');
     }
-  });
-
-  bot.action('add_channel', async (ctx) => {
-    await ctx.answerCbQuery();
-    ctx.reply('✏️ Используйте команду:\n`/addchannel @source @target1 [@target2 ...]`', { parse_mode: 'Markdown' });
-  });
-
-  bot.action('enable_forwarding', async (ctx) => {
-    await ctx.answerCbQuery('✅ Пересылка включена');
-    db.data.forwardingEnabled = true;
-    await db.write();
-  });
-
-  bot.action('disable_forwarding', async (ctx) => {
-    await ctx.answerCbQuery('❌ Пересылка отключена');
-    db.data.forwardingEnabled = false;
-    await db.write();
   });
 
   bot.command('addchannel', async (ctx) => {

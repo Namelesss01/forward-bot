@@ -27,6 +27,8 @@ async function main() {
     await db.write();
   }
 
+  const isAdmin = (id) => db.data.admins.includes(id);
+
   function getPairBySource(sourceChatId) {
     return db.data.pairs.find(p => p.source === sourceChatId);
   }
@@ -51,8 +53,7 @@ async function main() {
   }
 
   bot.start(async (ctx) => {
-    const isAdmin = db.data.admins.includes(ctx.from.id);
-    if (!isAdmin) return ctx.reply('❌ У вас нет прав администратора.');
+    if (!isAdmin(ctx.from.id)) return ctx.reply('❌ У вас нет прав администратора.');
 
     await ctx.reply('🔧 Панель управления:', Markup.inlineKeyboard([
       [Markup.button.callback('➕ Добавить канал', 'add_channel')],
@@ -65,12 +66,22 @@ async function main() {
     ]));
   });
 
+  bot.command('add_admin', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return ctx.reply('❌ Только админ может добавлять других.');
+    const userId = Number(ctx.message.text.split(' ')[1]);
+    if (!userId) return ctx.reply('❌ Укажите ID: /add_admin 123456');
+    if (!db.data.admins.includes(userId)) {
+      db.data.admins.push(userId);
+      await db.write();
+      ctx.reply(`✅ Админ с ID ${userId} добавлен.`);
+    } else ctx.reply('⚠️ Уже в списке админов.');
+  });
+
   bot.action('show_stats', async (ctx) => {
     await ctx.answerCbQuery();
     const now = Date.now();
     const fifteenMinutesAgo = now - 15 * 60 * 1000;
     const recentStats = db.data.stats.filter(stat => stat.time >= fifteenMinutesAgo);
-
     if (recentStats.length === 0) return ctx.reply('📊 За последние 15 минут пересылок не было.');
 
     const grouped = {};
@@ -92,7 +103,6 @@ async function main() {
   bot.action('list_pairs', async (ctx) => {
     await ctx.answerCbQuery();
     const pairs = db.data.pairs;
-
     if (pairs.length === 0) return ctx.reply('❌ Нет активных связок.');
 
     for (const pair of pairs) {
@@ -119,7 +129,25 @@ async function main() {
     }
   });
 
+  bot.action('add_channel', async (ctx) => {
+    await ctx.answerCbQuery();
+    ctx.reply('✏️ Используйте команду:\n`/addchannel @source @target1 [@target2 ...]`', { parse_mode: 'Markdown' });
+  });
+
+  bot.action('enable_forwarding', async (ctx) => {
+    await ctx.answerCbQuery('✅ Пересылка включена');
+    db.data.forwardingEnabled = true;
+    await db.write();
+  });
+
+  bot.action('disable_forwarding', async (ctx) => {
+    await ctx.answerCbQuery('❌ Пересылка отключена');
+    db.data.forwardingEnabled = false;
+    await db.write();
+  });
+
   bot.command('addchannel', async (ctx) => {
+    if (!isAdmin(ctx.from.id)) return;
     const args = ctx.message.text.split(' ').slice(1);
     if (args.length < 2) return ctx.reply('❌ Укажите: /addchannel @source @target1 [@target2 ...]');
 
@@ -129,7 +157,6 @@ async function main() {
     for (const target of targets) {
       const id = await getChatIdFromUsername(target);
       if (id) targetIds.push(id);
-      else ctx.reply(`⚠️ Не найден: ${target}`);
     }
     if (!sourceId || targetIds.length === 0) return ctx.reply('❌ Ошибка: исходный или целевые каналы не найдены.');
 
